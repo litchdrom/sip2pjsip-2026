@@ -7,7 +7,6 @@ KV_RE = re.compile(r"^\s*([^;=\s]+)\s*=\s*(.*?)\s*$")
 KV_COMMENTED_RE = re.compile(r"^\s*;\s*([^;=\s]+)\s*=\s*(.*?)\s*$")
 REGISTER_RE = re.compile(r"^\s*register\s*=>\s*(.*?)\s*$")
 
-
 def normalize_bool(v: str) -> Optional[bool]:
     v = v.strip().lower()
     if v in ("yes", "true", "1", "on"):
@@ -16,14 +15,12 @@ def normalize_bool(v: str) -> Optional[bool]:
         return False
     return None
 
-
-@dataclass
+dataclass
 class SipGlobals:
     externip: Optional[Tuple[str, int]] = None  # (ip, port)
     localnet: List[str] = field(default_factory=list)
     useragent: Optional[str] = None
     dtmfmode: Optional[str] = None
-
 
 @dataclass
 class SipPeer:
@@ -37,7 +34,6 @@ class SipPeer:
 
     def getall(self, key: str) -> List[str]:
         return self.kv.get(key.lower(), [])
-
 
 def parse_sip_conf(text: str) -> Tuple[SipGlobals, List[str], List[SipPeer]]:
     g = SipGlobals()
@@ -93,7 +89,6 @@ def parse_sip_conf(text: str) -> Tuple[SipGlobals, List[str], List[SipPeer]]:
 
     return g, register_lines, peers
 
-
 def dtmf_sip_to_pjsip(v: Optional[str]) -> Optional[str]:
     if not v:
         return None
@@ -104,7 +99,6 @@ def dtmf_sip_to_pjsip(v: Optional[str]) -> Optional[str]:
         return v
     return None
 
-
 def render_lines(lines: List[str], enabled: bool) -> str:
     if enabled:
         return "\n".join(lines) + "\n"
@@ -113,7 +107,6 @@ def render_lines(lines: List[str], enabled: bool) -> str:
         out.append((";" + ln) if ln.strip() else ";")
     return "\n".join(out) + "\n"
 
-
 def normalize_host(h: Optional[str]) -> Optional[str]:
     if not h:
         return None
@@ -121,7 +114,6 @@ def normalize_host(h: Optional[str]) -> Optional[str]:
     if h == "dynamic":
         return None
     return h
-
 
 def best_peer_for_registration(reg: Dict[str, str], peers: List[SipPeer]) -> Optional[SipPeer]:
     """
@@ -164,7 +156,6 @@ def best_peer_for_registration(reg: Dict[str, str], peers: List[SipPeer]) -> Opt
         return candidates_3[0]
     return None
 
-
 def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf: Optional[str]) -> str:
     name = peer.name
 
@@ -202,10 +193,6 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
         lines.append(f"allow={allow}")
     lines.append(f"dtmf_mode={dtmf_mode}")
 
-    # Prefer setting user_agent on endpoint-defaults template; do not duplicate unless you want overrides.
-    # if default_user_agent:
-    #     lines.append(f"user_agent={default_user_agent}")
-
     if direct_media is not None:
         lines.append(f"direct_media={'yes' if direct_media else 'no'}")
 
@@ -230,7 +217,7 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
     lines.append("")
 
     # aor
-    lines.append(f"[{name}]")
+    lines.append(f"[{name}]\n")
     lines.append("type=aor")
     if host and host.lower() != "dynamic":
         lines.append(f"contact=sip:{host}:{port}")
@@ -241,7 +228,7 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
 
     # outbound_auth (for trunks / peers that have secret)
     if secret and defaultuser:
-        lines.append(f"[{name}]")
+        lines.append(f"[{name}]\n")
         lines.append("type=outbound_auth")
         lines.append("auth_type=userpass")
         lines.append(f"username={defaultuser}")
@@ -250,7 +237,7 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
 
     # identify for static peers and domain trunks
     if host and host.lower() != "dynamic":
-        lines.append(f"[{name}]")
+        lines.append(f"[{name}]\n")
         lines.append("type=identify")
         lines.append(f"endpoint={name}")
         lines.append(f"match={host}")
@@ -258,7 +245,7 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
 
     # acl object
     if deny or permits:
-        lines.append(f"[{name}_acl]")
+        lines.append(f"[{name}_acl]\n")
         lines.append("type=acl")
         if deny:
             lines.append(f"deny={deny}")
@@ -267,7 +254,6 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
         lines.append("")
 
     return render_lines(lines, peer.enabled)
-
 
 def parse_register(spec: str) -> Dict[str, str]:
     """
@@ -308,7 +294,6 @@ def parse_register(spec: str) -> Dict[str, str]:
         out["expires"] = expires
     return out
 
-
 def render_registration(reg_name: str, outbound_auth_name: str, reg: Dict[str, str]) -> str:
     host = reg["host"]
     port = reg["port"]
@@ -317,7 +302,7 @@ def render_registration(reg_name: str, outbound_auth_name: str, reg: Dict[str, s
     expires = reg.get("expires", "360")
 
     lines: List[str] = []
-    lines.append(f"[{reg_name}]")
+    lines.append(f"[{reg_name}]\n")
     lines.append("type=registration")
     lines.append("transport=transport-udp")
     lines.append(f"outbound_auth={outbound_auth_name}")
@@ -331,7 +316,6 @@ def render_registration(reg_name: str, outbound_auth_name: str, reg: Dict[str, s
     lines.append("fatal_retry_interval=0")
     lines.append("")
     return "\n".join(lines) + "\n"
-
 
 def generate(text: str) -> str:
     g, registers, peers = parse_sip_conf(text)
@@ -400,8 +384,8 @@ def generate(text: str) -> str:
                 f"[{outbound_auth_name}]",
                 "type=outbound_auth",
                 "auth_type=userpass",
-                f"username={reg['user']}",
-                f"password={reg['pass']}",
+                f"username={reg['user']}\\n",
+                f"password={reg['pass']}\\n",
                 "",
             ]
             out.append(render_lines(auth_lines, enabled))
@@ -411,7 +395,6 @@ def generate(text: str) -> str:
 
     out.append("")
     return "\n".join(out)
-
 
 if __name__ == "__main__":
     import sys
