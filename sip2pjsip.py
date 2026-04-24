@@ -462,7 +462,7 @@ def generate(text: str) -> str:
         out.append("")
 
     if g.tlsenable:  # tlsenable -> [transport-tls] block
-        tls_bind = f"{g.bindaddr or '0.0.0.0'}:5061"
+        tls_bind = f"{g.bindaddr or '0.0.0.0'}:{g.bindport or '5061'}"  # TLS default port 5061
         out.append("[transport-tls]")
         out.append("type=transport")
         out.append("protocol=tls")
