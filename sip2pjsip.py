@@ -179,6 +179,8 @@ def best_peer_for_registration(reg: Dict[str, str], peers: List[SipPeer]) -> Opt
 
 def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf: Optional[str]) -> str:
     name = peer.name
+    auth_name = f"{name}-auth"          # unique auth section name avoids [name] collision
+    identify_name = f"{name}-identify"  # unique identify section name avoids [name] collision
 
     host = peer.get1("host")
     port = peer.get1("port") or "5060"
@@ -286,7 +288,7 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
 
     # outbound_auth if we have secret + username-ish (skipped when insecure omits auth)
     if secret and defaultuser and not insecure_no_auth:
-        lines.append(f"outbound_auth={name}")
+        lines.append(f"outbound_auth={auth_name}")  # references [name-auth] section
 
     if qualify and qualify.lower() not in ("no", "false", "0"):
         if qualify.lower() in ("yes", "true", "1", "on"):
@@ -314,14 +316,17 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
     if busylevel:
         lines.append(f"devicestate_busy_at={busylevel}")  # busylevel= direct copy
 
-    # ACL for static peers with permit/deny
-    if deny or permits:
-        lines.append(f"acl={name}_acl")
+    # deny/permit written inline on the endpoint; acl= would reference acl.conf named ACLs
+    # (which are different from pjsip.conf type=acl objects) so use direct options instead
+    if deny:
+        lines.append(f"deny={deny}")
+    for p in permits:
+        lines.append(f"permit={p}")
 
     lines.append("")
 
-    # aor
-    lines.append(f"[{name}]\n")
+    # aor — same name as endpoint is the standard PJSIP pattern
+    lines.append(f"[{name}]")
     lines.append("type=aor")
     if host and host.lower() != "dynamic":
         lines.append(f"contact=sip:{host}:{port}")
@@ -330,31 +335,21 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
         lines.append("remove_existing=yes")
     lines.append("")
 
-    # outbound_auth (for trunks / peers that have secret)
+    # auth — uses [name-auth] to avoid section-name collision with endpoint/aor
     if secret and defaultuser:
-        lines.append(f"[{name}]\n")
-        lines.append("type=outbound_auth")
+        lines.append(f"[{auth_name}]")
+        lines.append("type=auth")
         lines.append("auth_type=userpass")
         lines.append(f"username={defaultuser}")
         lines.append(f"password={secret}")
         lines.append("")
 
-    # identify for static peers and domain trunks
+    # identify — uses [name-identify] to avoid section-name collision with endpoint/aor
     if host and host.lower() != "dynamic":
-        lines.append(f"[{name}]\n")
+        lines.append(f"[{identify_name}]")
         lines.append("type=identify")
         lines.append(f"endpoint={name}")
         lines.append(f"match={host}")
-        lines.append("")
-
-    # acl object
-    if deny or permits:
-        lines.append(f"[{name}_acl]\n")
-        lines.append("type=acl")
-        if deny:
-            lines.append(f"deny={deny}")
-        for p in permits:
-            lines.append(f"permit={p}")
         lines.append("")
 
     return render_lines(lines, peer.enabled)
@@ -406,7 +401,7 @@ def render_registration(reg_name: str, outbound_auth_name: str, reg: Dict[str, s
     expires = reg.get("expires", "360")
 
     lines: List[str] = []
-    lines.append(f"[{reg_name}]\n")
+    lines.append(f"[{reg_name}]")
     lines.append("type=registration")
     lines.append("transport=transport-udp")
     lines.append(f"outbound_auth={outbound_auth_name}")
@@ -421,8 +416,45 @@ def render_registration(reg_name: str, outbound_auth_name: str, reg: Dict[str, s
     lines.append("")
     return "\n".join(lines) + "\n"
 
+def _deduplicate_peers(peers: List[SipPeer]) -> List[SipPeer]:
+    """Merge peers that share the same section name.
+
+    When sip.conf defines the same name twice (e.g. once as type=peer and
+    once as type=user), we combine them so that a single PJSIP endpoint
+    section is emitted instead of two conflicting blocks.  The first
+    occurrence provides the primary values; subsequent occurrences
+    contribute keys not already present and accumulate repeated keys
+    (e.g. multiple permit= lines).  A section is treated as enabled if
+    any occurrence is enabled.
+    """
+    seen: Dict[str, SipPeer] = {}
+    order: List[str] = []
+    for p in peers:
+        if p.name not in seen:
+            seen[p.name] = SipPeer(
+                name=p.name,
+                enabled=p.enabled,
+                kv={k: list(v) for k, v in p.kv.items()},
+            )
+            order.append(p.name)
+        else:
+            merged = seen[p.name]
+            for k, vals in p.kv.items():
+                if k not in merged.kv:
+                    merged.kv[k] = list(vals)
+                else:
+                    # Accumulate unique values for repeated keys (e.g. permit)
+                    for v in vals:
+                        if v not in merged.kv[k]:
+                            merged.kv[k].append(v)
+            if p.enabled:
+                merged.enabled = True
+    return [seen[n] for n in order]
+
+
 def generate(text: str) -> str:
     g, registers, peers = parse_sip_conf(text)
+    peers = _deduplicate_peers(peers)
 
     ext_ip = g.externip[0] if g.externip else None
     ext_port = g.externip[1] if g.externip else 5060
@@ -507,7 +539,7 @@ def generate(text: str) -> str:
         peer = best_peer_for_registration(reg, peers)
 
         if peer:
-            outbound_auth_name = peer.name
+            outbound_auth_name = f"{peer.name}-auth"  # matches [name-auth] section
             reg_name = f"{peer.name}_reg"
             enabled = peer.enabled
         else:
@@ -516,13 +548,13 @@ def generate(text: str) -> str:
             reg_name = f"{outbound_auth_name}_reg"
             enabled = True
 
-            # must create outbound_auth for orphan registrations
+            # must create auth for orphan registrations
             auth_lines = [
                 f"[{outbound_auth_name}]",
-                "type=outbound_auth",
+                "type=auth",
                 "auth_type=userpass",
-                f"username={reg['user']}\\n",
-                f"password={reg['pass']}\\n",
+                f"username={reg['user']}",
+                f"password={reg['pass']}",
                 "",
             ]
             out.append(render_lines(auth_lines, enabled))

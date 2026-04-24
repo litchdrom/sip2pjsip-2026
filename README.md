@@ -19,9 +19,9 @@ A Python utility that converts Asterisk `sip.conf` configuration files to the mo
 - **Peer / trunk conversion** — each `[peername]` section becomes a set of PJSIP objects:
   - `endpoint` — inherits from a shared `[endpoint-defaults](!)` template
   - `aor` — contact URI for static hosts, `max_contacts` for dynamic peers
-  - `outbound_auth` — generated when `secret` + username are present
-  - `identify` — IP-based matching for static peers and trunks
-  - `acl` — created when `permit`/`deny` rules are present
+  - `auth` — generated as `[peername-auth]` when `secret` + username are present
+  - `identify` — IP-based matching for static peers, generated as `[peername-identify]`
+  - per-endpoint `deny`/`permit` — written inline on the endpoint (not as a separate ACL object)
 - **Mapped peer options**:
   - `nat=` → `rtp_symmetric`, `force_rport`, `rewrite_contact`
   - `insecure=` → `rtp_symmetric` / skips outbound auth reference
@@ -81,9 +81,8 @@ The generated `pjsip.conf` is organised into clearly labelled sections:
 | `[endpoint-defaults](!)` | Shared template inherited by all endpoints |
 | `[peername](endpoint-defaults)` | One `endpoint` per peer/trunk |
 | `[peername]` (aor) | Address-of-record for the peer |
-| `[peername]` (outbound_auth) | Credentials, if a secret is configured |
-| `[peername]` (identify) | IP-matching block for static peers |
-| `[peername_acl]` | ACL rules, if permit/deny are configured |
+| `[peername-auth]` | Credentials (`type=auth`), if a secret is configured |
+| `[peername-identify]` | IP-matching block (`type=identify`) for static peers |
 | `[peername_reg]` | Registration block (from `register =>` lines) |
 
 ---
