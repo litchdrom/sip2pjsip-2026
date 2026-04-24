@@ -15,12 +15,19 @@ def normalize_bool(v: str) -> Optional[bool]:
         return False
     return None
 
-dataclass
+@dataclass
 class SipGlobals:
     externip: Optional[Tuple[str, int]] = None  # (ip, port)
     localnet: List[str] = field(default_factory=list)
     useragent: Optional[str] = None
     dtmfmode: Optional[str] = None
+    tcpenable: bool = False        # tcpenable in [general]
+    tlsenable: bool = False        # tlsenable in [general]
+    tlscertfile: Optional[str] = None   # tlscertfile in [general]
+    tlsprivatekey: Optional[str] = None # tlsprivatekey in [general]
+    tlscafile: Optional[str] = None     # tlscafile in [general]
+    bindport: Optional[str] = None      # bindport in [general]
+    bindaddr: Optional[str] = None      # bindaddr in [general]
 
 @dataclass
 class SipPeer:
@@ -77,6 +84,20 @@ def parse_sip_conf(text: str) -> Tuple[SipGlobals, List[str], List[SipPeer]]:
                 g.useragent = v
             elif k == "dtmfmode":
                 g.dtmfmode = v
+            elif k == "tcpenable":
+                g.tcpenable = bool(normalize_bool(v))   # tcpenable -> TCP transport
+            elif k == "tlsenable":
+                g.tlsenable = bool(normalize_bool(v))   # tlsenable -> TLS transport
+            elif k == "tlscertfile":
+                g.tlscertfile = v
+            elif k == "tlsprivatekey":
+                g.tlsprivatekey = v
+            elif k == "tlscafile":
+                g.tlscafile = v
+            elif k == "bindport":
+                g.bindport = v
+            elif k == "bindaddr":
+                g.bindaddr = v
             continue
 
         # inside section: parse key=val even if section is disabled
@@ -180,6 +201,16 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
     deny = peer.get1("deny")
     permits = peer.getall("permit")
 
+    nat = peer.get1("nat")                      # nat= -> rtp_symmetric/force_rport/rewrite_contact
+    callerid = peer.get1("callerid")            # callerid= direct copy
+    encryption = peer.get1("encryption")        # encryption= -> media_encryption
+    outboundproxy = peer.get1("outboundproxy")  # outboundproxy= -> outbound_proxy=
+    setvars = peer.getall("setvar")             # setvar= (repeated) -> set_var=
+    transport = peer.get1("transport")          # transport= per-peer -> named transport
+    insecure = peer.get1("insecure")            # insecure= -> auth/rtp_symmetric handling
+    mailbox = peer.get1("mailbox")              # mailbox= -> mailboxes=
+    busylevel = peer.get1("busylevel")          # busylevel= -> devicestate_busy_at=
+
     lines: List[str] = []
 
     # endpoint
@@ -201,14 +232,87 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
     if fromdomain:
         lines.append(f"from_domain={fromdomain}")
 
+    if callerid:
+        lines.append(f"callerid={callerid}")  # callerid= direct copy
+
+    # nat= mapping
+    rtp_symmetric_set = False  # track to avoid duplicate from nat + insecure=port
+    if nat:
+        nat_l = nat.strip().lower()
+        if nat_l == "yes":
+            lines.append("rtp_symmetric=yes")    # nat=yes
+            lines.append("force_rport=yes")
+            lines.append("rewrite_contact=yes")
+            rtp_symmetric_set = True
+        elif nat_l == "no":
+            lines.append("rtp_symmetric=no")     # nat=no
+            lines.append("force_rport=no")
+            lines.append("rewrite_contact=no")
+            rtp_symmetric_set = True
+        elif nat_l == "force_rport":
+            lines.append("force_rport=yes")      # nat=force_rport
+            lines.append("rtp_symmetric=yes")
+            lines.append("rewrite_contact=yes")
+            rtp_symmetric_set = True
+        elif nat_l == "comedia":
+            lines.append("rtp_symmetric=yes")    # nat=comedia
+            rtp_symmetric_set = True
+
+    # insecure= extra mappings (rtp_symmetric already may be set by nat above)
+    insecure_no_auth = False
+    if insecure:
+        insecure_l = insecure.strip().lower()
+        # insecure=port or insecure=invite,port -> rtp_symmetric=yes (skip if already set)
+        if insecure_l in ("port", "invite,port", "port,invite") and not rtp_symmetric_set:
+            lines.append("rtp_symmetric=yes")    # insecure=port
+        # invite or yes -> omit outbound auth reference on endpoint
+        if insecure_l in ("invite", "yes", "invite,port", "port,invite"):
+            insecure_no_auth = True              # insecure=invite/yes -> skip auth
+
+    # media_encryption from encryption=
+    if encryption:
+        enc_l = normalize_bool(encryption)
+        if enc_l is True:
+            lines.append("media_encryption=sdes")  # encryption=yes -> sdes
+        elif enc_l is False:
+            lines.append("media_encryption=no")    # encryption=no
+
+    # transport= per-peer mapping to named transport objects
+    _TRANSPORT_MAP = {"udp": "transport-udp", "tcp": "transport-tcp", "tls": "transport-tls"}
+    if transport and transport.lower() in _TRANSPORT_MAP:
+        lines.append(f"transport={_TRANSPORT_MAP[transport.lower()]}")  # transport= peer
+
     lines.append(f"aors={name}")
 
-    # outbound_auth if we have secret + username-ish
-    if secret and defaultuser:
+    # outbound_auth if we have secret + username-ish (skipped when insecure omits auth)
+    if secret and defaultuser and not insecure_no_auth:
         lines.append(f"outbound_auth={name}")
 
     if qualify and qualify.lower() not in ("no", "false", "0"):
-        lines.append("qualify_frequency=60")
+        if qualify.lower() in ("yes", "true", "1", "on"):
+            lines.append("qualify_frequency=60")        # qualify=yes -> default 60 s
+        else:
+            try:
+                freq = max(1, int(qualify) // 1000)
+                lines.append(f"qualify_frequency={freq}")  # qualify in ms -> seconds
+            except ValueError:
+                lines.append("qualify_frequency=60")
+
+    # outbound_proxy= from outboundproxy=
+    if outboundproxy:
+        lines.append(f"outbound_proxy={outboundproxy}")  # outboundproxy= direct copy
+
+    # set_var= (one per setvar= entry)
+    for sv in setvars:
+        lines.append(f"set_var={sv}")  # setvar= -> set_var=
+
+    # mailboxes= from mailbox=
+    if mailbox:
+        lines.append(f"mailboxes={mailbox}")  # mailbox= -> mailboxes=
+
+    # devicestate_busy_at= from busylevel=
+    if busylevel:
+        lines.append(f"devicestate_busy_at={busylevel}")  # busylevel= direct copy
 
     # ACL for static peers with permit/deny
     if deny or permits:
@@ -332,16 +436,49 @@ def generate(text: str) -> str:
 
     # transport
     out.append("; ===== TRANSPORTS =====")
+    udp_bind = f"{g.bindaddr or '0.0.0.0'}:{g.bindport or '5060'}"  # bindaddr/bindport
     out.append("[transport-udp]")
     out.append("type=transport")
     out.append("protocol=udp")
-    out.append("bind=0.0.0.0:5060")
+    out.append(f"bind={udp_bind}")
     if ext_ip:
         out.append(f"external_signaling_address={ext_ip}")
         out.append(f"external_signaling_port={ext_port}")
     for ln in g.localnet:
         out.append(f"local_net={ln}")
     out.append("")
+
+    if g.tcpenable:  # tcpenable -> [transport-tcp] block
+        tcp_bind = f"{g.bindaddr or '0.0.0.0'}:{g.bindport or '5060'}"
+        out.append("[transport-tcp]")
+        out.append("type=transport")
+        out.append("protocol=tcp")
+        out.append(f"bind={tcp_bind}")
+        if ext_ip:
+            out.append(f"external_signaling_address={ext_ip}")
+            out.append(f"external_signaling_port={ext_port}")
+        for ln in g.localnet:
+            out.append(f"local_net={ln}")
+        out.append("")
+
+    if g.tlsenable:  # tlsenable -> [transport-tls] block
+        tls_bind = f"{g.bindaddr or '0.0.0.0'}:{g.bindport or '5061'}"  # TLS default port 5061
+        out.append("[transport-tls]")
+        out.append("type=transport")
+        out.append("protocol=tls")
+        out.append(f"bind={tls_bind}")
+        if g.tlscertfile:
+            out.append(f"cert_file={g.tlscertfile}")       # tlscertfile
+        if g.tlsprivatekey:
+            out.append(f"priv_key_file={g.tlsprivatekey}") # tlsprivatekey
+        if g.tlscafile:
+            out.append(f"ca_list_file={g.tlscafile}")      # tlscafile
+        if ext_ip:
+            out.append(f"external_signaling_address={ext_ip}")
+            out.append(f"external_signaling_port={ext_port}")
+        for ln in g.localnet:
+            out.append(f"local_net={ln}")
+        out.append("")
 
     # template
     out.append("; ===== TEMPLATES =====")
