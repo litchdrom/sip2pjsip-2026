@@ -42,17 +42,48 @@ class SipPeer:
     def getall(self, key: str) -> List[str]:
         return self.kv.get(key.lower(), [])
 
+def _apply_general_kv(g: SipGlobals, k: str, v: str) -> None:
+    """Parse a single key=value that belongs to the [general] scope into g."""
+    if k == "externip":
+        # externip can be ip or ip:port
+        if ":" in v:
+            ip, port = v.split(":", 1)
+            g.externip = (ip.strip(), int(port.strip()))
+        else:
+            g.externip = (v.strip(), 5060)
+    elif k == "localnet":
+        g.localnet.append(v)
+    elif k == "useragent":
+        g.useragent = v
+    elif k == "dtmfmode":
+        g.dtmfmode = v
+    elif k == "tcpenable":
+        g.tcpenable = bool(normalize_bool(v))   # tcpenable -> TCP transport
+    elif k == "tlsenable":
+        g.tlsenable = bool(normalize_bool(v))   # tlsenable -> TLS transport
+    elif k == "tlscertfile":
+        g.tlscertfile = v
+    elif k == "tlsprivatekey":
+        g.tlsprivatekey = v
+    elif k == "tlscafile":
+        g.tlscafile = v
+    elif k == "bindport":
+        g.bindport = v
+    elif k == "bindaddr":
+        g.bindaddr = v
+
 def parse_sip_conf(text: str) -> Tuple[SipGlobals, List[str], List[SipPeer]]:
     g = SipGlobals()
     register_lines: List[str] = []
     peers: List[SipPeer] = []
     cur: Optional[SipPeer] = None
+    in_general: bool = False  # True while processing the [general] section
 
     for raw in text.splitlines():
         line = raw.rstrip("\n")
 
         mreg = REGISTER_RE.match(line)
-        if mreg and (cur is None or cur.name.lower() == "general"):
+        if mreg and (cur is None or in_general):
             register_lines.append(mreg.group(1).strip())
             continue
 
@@ -60,47 +91,21 @@ def parse_sip_conf(text: str) -> Tuple[SipGlobals, List[str], List[SipPeer]]:
         if msec:
             commented = bool(msec.group(1))
             name = msec.group(2).strip()
+            in_general = name.lower() == "general"
             cur = SipPeer(name=name, enabled=(not commented))
-            peers.append(cur)
+            if not in_general:
+                peers.append(cur)
             continue
 
-        # globals (only when not in a section)
-        if cur is None:
+        # globals: lines before any section header OR inside [general]
+        if cur is None or in_general:
             mkv = KV_RE.match(line)
             if not mkv:
                 continue
-            k = mkv.group(1).strip().lower()
-            v = mkv.group(2).strip()
-            if k == "externip":
-                # externip can be ip or ip:port
-                if ":" in v:
-                    ip, port = v.split(":", 1)
-                    g.externip = (ip.strip(), int(port.strip()))
-                else:
-                    g.externip = (v.strip(), 5060)
-            elif k == "localnet":
-                g.localnet.append(v)
-            elif k == "useragent":
-                g.useragent = v
-            elif k == "dtmfmode":
-                g.dtmfmode = v
-            elif k == "tcpenable":
-                g.tcpenable = bool(normalize_bool(v))   # tcpenable -> TCP transport
-            elif k == "tlsenable":
-                g.tlsenable = bool(normalize_bool(v))   # tlsenable -> TLS transport
-            elif k == "tlscertfile":
-                g.tlscertfile = v
-            elif k == "tlsprivatekey":
-                g.tlsprivatekey = v
-            elif k == "tlscafile":
-                g.tlscafile = v
-            elif k == "bindport":
-                g.bindport = v
-            elif k == "bindaddr":
-                g.bindaddr = v
+            _apply_general_kv(g, mkv.group(1).strip().lower(), mkv.group(2).strip())
             continue
 
-        # inside section: parse key=val even if section is disabled
+        # inside a regular peer section: parse key=val even if section is disabled
         mkv = KV_RE.match(line) or KV_COMMENTED_RE.match(line)
         if not mkv:
             continue
@@ -177,7 +182,8 @@ def best_peer_for_registration(reg: Dict[str, str], peers: List[SipPeer]) -> Opt
         return candidates_3[0]
     return None
 
-def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf: Optional[str]) -> str:
+def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf: Optional[str],
+                 reg_auth: Optional[Dict[str, str]] = None) -> str:
     name = peer.name
     auth_name = f"{name}-auth"          # unique auth section name avoids [name] collision
     identify_name = f"{name}-identify"  # unique identify section name avoids [name] collision
@@ -195,6 +201,12 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
 
     defaultuser = peer.get1("defaultuser") or peer.get1("fromuser")
     secret = peer.get1("secret")
+    # When the peer itself has no secret, use credentials supplied by a matching
+    # register => line so that outbound_auth and the auth section are still emitted.
+    if not secret and reg_auth:
+        secret = reg_auth.get("pass")
+        if not defaultuser:
+            defaultuser = reg_auth.get("user")
     fromuser = peer.get1("fromuser")
     fromdomain = peer.get1("fromdomain")
 
@@ -522,10 +534,28 @@ def generate(text: str) -> str:
     out.append("direct_media=no")
     out.append("")
 
+    # Pre-process register lines: match each to a peer so that convert_peer can
+    # inject missing auth credentials before the endpoint block is rendered.
+    reg_for_peer: Dict[str, Dict[str, str]] = {}  # peer_name -> parsed register dict
+    peers_with_reg: Dict[str, Dict[str, str]] = {}  # peer_name -> parsed register dict (all matched)
+
+    for rline in registers:
+        reg = parse_register(rline)
+        if "parse_error" in reg:
+            continue
+        peer = best_peer_for_registration(reg, peers)
+        if peer:
+            # Only the first matched register line per peer is used for auth injection and
+            # auto-registration; subsequent lines for the same peer are rendered as-is.
+            peers_with_reg.setdefault(peer.name, reg)
+            if not peer.get1("secret"):
+                # Peer has no inline secret: register line provides auth credentials
+                reg_for_peer.setdefault(peer.name, reg)
+
     # peers
     out.append("; ===== PEERS/TRUNKS =====")
     for p in peers:
-        out.append(convert_peer(p, default_user_agent, default_dtmf))
+        out.append(convert_peer(p, default_user_agent, default_dtmf, reg_for_peer.get(p.name)))
 
     # register lines -> link to matching peers
     out.append("; ===== REGISTRATIONS (from register =>) =====")
@@ -541,6 +571,8 @@ def generate(text: str) -> str:
             outbound_auth_name = f"{peer.name}-auth"  # matches [name-auth] section
             reg_name = f"{peer.name}_reg"
             enabled = peer.enabled
+            # Auth section was already emitted by convert_peer (from peer.secret or reg_auth),
+            # so no extra auth block is needed here.
         else:
             # fallback deterministic name if no match
             outbound_auth_name = f"reg_{idx}_{reg['user']}_{reg['host']}".replace(".", "_")
@@ -560,6 +592,27 @@ def generate(text: str) -> str:
 
         reg_block = render_registration(reg_name, outbound_auth_name, reg)
         out.append(render_lines(reg_block.splitlines(), enabled))
+
+    # Auto-generate registration blocks for trunk peers that have static host +
+    # credentials but no matching register => line.  Without this block the trunk
+    # cannot register with the provider to receive inbound calls.
+    for p in peers:
+        if p.name in peers_with_reg:
+            continue  # already handled by a register => line above
+
+        p_secret = p.get1("secret")
+        p_user = p.get1("defaultuser") or p.get1("fromuser")
+        p_host = p.get1("host")
+        p_port = p.get1("port") or "5060"
+
+        if p_secret and p_user and p_host and p_host.lower() != "dynamic":
+            auto_reg: Dict[str, str] = {
+                "host": p_host,
+                "port": p_port,
+                "user": p_user,
+            }
+            reg_block = render_registration(f"{p.name}_reg", f"{p.name}-auth", auto_reg)
+            out.append(render_lines(reg_block.splitlines(), p.enabled))
 
     out.append("")
     return "\n".join(out)
