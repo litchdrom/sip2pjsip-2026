@@ -52,7 +52,7 @@ def parse_sip_conf(text: str) -> Tuple[SipGlobals, List[str], List[SipPeer]]:
         line = raw.rstrip("\n")
 
         mreg = REGISTER_RE.match(line)
-        if mreg and cur is None:
+        if mreg and (cur is None or cur.name.lower() == "general"):
             register_lines.append(mreg.group(1).strip())
             continue
 
@@ -290,16 +290,6 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
     if secret and defaultuser and not insecure_no_auth:
         lines.append(f"outbound_auth={auth_name}")  # references [name-auth] section
 
-    if qualify and qualify.lower() not in ("no", "false", "0"):
-        if qualify.lower() in ("yes", "true", "1", "on"):
-            lines.append("qualify_frequency=60")        # qualify=yes -> default 60 s
-        else:
-            try:
-                freq = max(1, int(qualify) // 1000)
-                lines.append(f"qualify_frequency={freq}")  # qualify in ms -> seconds
-            except ValueError:
-                lines.append("qualify_frequency=60")
-
     # outbound_proxy= from outboundproxy=
     if outboundproxy:
         lines.append(f"outbound_proxy={outboundproxy}")  # outboundproxy= direct copy
@@ -333,6 +323,15 @@ def convert_peer(peer: SipPeer, default_user_agent: Optional[str], default_dtmf:
     else:
         lines.append("max_contacts=1")
         lines.append("remove_existing=yes")
+    if qualify and qualify.lower() not in ("no", "false", "0"):
+        if qualify.lower() in ("yes", "true", "1", "on"):
+            lines.append("qualify_frequency=60")        # qualify=yes -> default 60 s
+        else:
+            try:
+                freq = max(1, int(qualify) // 1000)
+                lines.append(f"qualify_frequency={freq}")  # qualify in ms -> seconds
+            except ValueError:
+                lines.append("qualify_frequency=60")
     lines.append("")
 
     # auth — uses [name-auth] to avoid section-name collision with endpoint/aor
