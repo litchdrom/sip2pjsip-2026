@@ -236,16 +236,21 @@ def convert_row(
         elif enc is False:
             ep["media_encryption"] = "no"
 
-    # outbound_auth
+    # auth / outbound_auth
+    # Dynamic peers (phones) register *to* Asterisk → use auth= for inbound challenge.
+    # Static peers (trunks) have Asterisk register *to* them → use outbound_auth=.
     if secret and defaultuser and not insecure_no_auth:
-        ep["outbound_auth"] = auth_id
+        if is_dynamic:
+            ep["auth"] = auth_id
+        else:
+            ep["outbound_auth"] = auth_id
 
     if outboundprx:
         ep["outbound_proxy"] = outboundprx
     if mailbox:
         ep["mailboxes"] = mailbox
     if busylevel:
-        ep["devicestate_busy_at"] = busylevel
+        ep["device_state_busy_at"] = busylevel
     if deny:
         ep["deny"] = deny
     if permit:
