@@ -97,6 +97,78 @@ The generated `pjsip.conf` is organised into clearly labelled sections:
 
 ---
 
+---
+
+## Realtime migration: `sip2pjsip_realtime.py`
+
+A companion script that migrates chan_sip peers stored in a MySQL/MariaDB
+realtime table (`sip_friends`) directly into the PJSIP realtime tables.
+
+### What it does
+
+For every row in `sip_friends` the script creates matching rows in:
+
+| PJSIP table | Condition |
+|---|---|
+| `ps_endpoints` | Always |
+| `ps_aors` | Always |
+| `ps_auths` | When `secret` + `defaultuser`/`fromuser` are set |
+| `ps_registrations` | When a static host + credentials are present |
+
+The field mapping is identical to `sip2pjsip.py` (nat, insecure, dtmfmode,
+transport, qualify, etc.).
+
+### Requirements
+
+```bash
+pip install pymysql        # or: pip install -r requirements.txt
+```
+
+### Usage
+
+```bash
+# Dry-run: print SQL instead of executing it
+python sip2pjsip_realtime.py \
+    --host 127.0.0.1 --port 3306 \
+    --user asterisk --password secret \
+    --db asterisk \
+    --dry-run
+
+# Live migration (skip peers that are already in the PJSIP tables)
+python sip2pjsip_realtime.py \
+    --host 127.0.0.1 \
+    --user asterisk --password secret \
+    --db asterisk \
+    --skip-existing \
+    --verbose
+```
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--host` | `127.0.0.1` | MySQL server hostname |
+| `--port` | `3306` | MySQL server port |
+| `--user` | `asterisk` | MySQL username |
+| `--password` | *(empty)* | MySQL password |
+| `--db` | `asterisk` | Database name |
+| `--src-table` | `sip_friends` | Source table name |
+| `--default-transport` | `transport-udp` | PJSIP transport when peer has no `transport=` |
+| `--dry-run` | off | Print SQL without executing |
+| `--skip-existing` | off | `INSERT IGNORE` — skip rows that already exist |
+| `--verbose` / `-v` | off | Print each peer name as it is processed |
+
+### Notes
+
+- Run `--dry-run` first and review the output before a live migration.
+- The PJSIP tables must already exist (created by Asterisk's `ast_db_init` or
+  the supplied DDL scripts before running this tool).
+- `ps_contacts` and `ps_transports` are **not** populated by this script;
+  `ps_contacts` is managed by Asterisk itself at runtime and `ps_transports`
+  is typically configured statically in `pjsip.conf` / `pjsip_transports.conf`.
+
+---
+
 ## License
 
 MIT

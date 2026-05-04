@@ -1,3 +1,6 @@
-# No third-party packages are required.
 # Python >= 3.8 required.
-# This project uses only the Python standard library (re, dataclasses, typing, sys).
+#
+# sip2pjsip.py  — stdlib only (re, dataclasses, typing, sys), no extra packages needed.
+#
+# sip2pjsip_realtime.py — requires PyMySQL to connect to MySQL/MariaDB.
+pymysql>=1.1.0
