@@ -75,6 +75,15 @@ def _dtmf_to_pjsip(v: Optional[str]) -> str:
     return "rfc4733"
 
 
+# Safe pattern for table names: letters, digits, underscores only.
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+# Default registration timer values (seconds).
+_REG_EXPIRATION             = "360"
+_REG_RETRY_INTERVAL         = "60"
+_REG_FORBIDDEN_RETRY_INTERVAL = "600"
+_REG_FATAL_RETRY_INTERVAL   = "0"
+
 _TRANSPORT_MAP = {
     "udp": "transport-udp",
     "tcp": "transport-tcp",
@@ -276,10 +285,10 @@ def convert_row(
             "outbound_auth":            auth_id,
             "server_uri":               f"sip:{host}:{port}",
             "client_uri":               f"sip:{defaultuser}@{host}",
-            "expiration":               "360",
-            "retry_interval":           "60",
-            "forbidden_retry_interval": "600",
-            "fatal_retry_interval":     "0",
+            "expiration":               _REG_EXPIRATION,
+            "retry_interval":           _REG_RETRY_INTERVAL,
+            "forbidden_retry_interval": _REG_FORBIDDEN_RETRY_INTERVAL,
+            "fatal_retry_interval":     _REG_FATAL_RETRY_INTERVAL,
         }
 
     return {
@@ -294,10 +303,28 @@ def convert_row(
 # SQL helpers
 # ---------------------------------------------------------------------------
 
-def _build_insert(table: str, row: Dict[str, str], ignore: bool) -> str:
-    cols   = ", ".join(f"`{c}`" for c in row)
-    vals   = ", ".join(f"'{v}'" for v in row.values())
-    kw     = "INSERT IGNORE" if ignore else "INSERT"
+# Columns whose values are redacted in dry-run SQL output to avoid leaking
+# credentials in logs or terminal history.
+_SENSITIVE_COLS = frozenset({"password", "secret", "md5secret"})
+
+
+def _build_insert(table: str, row: Dict[str, str], ignore: bool, redact: bool = False) -> str:
+    """Build a display-safe INSERT statement.
+
+    Values are single-quote-escaped (``'`` -> ``''``) so that the output is
+    safe to copy-paste into a MySQL client.  When *redact* is True the content
+    of sensitive columns (``password`` etc.) is replaced with ``[REDACTED]``.
+    """
+    cols = ", ".join(f"`{c}`" for c in row)
+    vals_list: List[str] = []
+    for col, val in row.items():
+        if redact and col in _SENSITIVE_COLS:
+            vals_list.append("'[REDACTED]'")
+        else:
+            escaped = val.replace("'", "''")
+            vals_list.append(f"'{escaped}'")
+    vals = ", ".join(vals_list)
+    kw   = "INSERT IGNORE" if ignore else "INSERT"
     return f"{kw} INTO `{table}` ({cols}) VALUES ({vals});"
 
 
@@ -308,15 +335,16 @@ def _execute_or_print(
     ignore: bool,
     dry_run: bool,
 ) -> None:
-    sql = _build_insert(table, row, ignore)
     if dry_run:
-        print(sql)
+        # Redact sensitive columns in the printed output so that passwords do
+        # not appear in terminal history or CI logs.
+        print(_build_insert(table, row, ignore, redact=True))
     else:
         # Use parameterised query for the actual insert to protect against
         # values that contain special characters such as single-quotes.
-        cols        = ", ".join(f"`{c}`" for c in row)
+        cols         = ", ".join(f"`{c}`" for c in row)
         placeholders = ", ".join(["%s"] * len(row))
-        kw          = "INSERT IGNORE" if ignore else "INSERT"
+        kw           = "INSERT IGNORE" if ignore else "INSERT"
         cursor.execute(
             f"{kw} INTO `{table}` ({cols}) VALUES ({placeholders})",
             list(row.values()),
@@ -347,6 +375,15 @@ def migrate(args: argparse.Namespace) -> int:
         conn = pymysql.connect(**conn_kwargs)
     except pymysql.err.OperationalError as exc:
         print(f"ERROR: Could not connect to MySQL: {exc}", file=sys.stderr)
+        return 0
+
+    if not _TABLE_NAME_RE.match(args.src_table):
+        print(
+            f"ERROR: Invalid source table name '{args.src_table}'. "
+            "Only letters, digits and underscores are allowed.",
+            file=sys.stderr,
+        )
+        conn.close()
         return 0
 
     processed = 0
