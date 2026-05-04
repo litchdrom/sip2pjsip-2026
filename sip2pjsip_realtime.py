@@ -169,7 +169,7 @@ def convert_row(
     is_dynamic = (not host) or host.lower() == "dynamic"
 
     # --- ps_endpoints -------------------------------------------------------
-    ep: Dict[str, str] = {"id": name, "type": "endpoint"}
+    ep: Dict[str, str] = {"id": name}
 
     chosen_transport = _TRANSPORT_MAP.get((transport or "").lower(), default_transport)
     ep["transport"] = chosen_transport
@@ -252,7 +252,7 @@ def convert_row(
         ep["permit"] = permit
 
     # --- ps_aors ------------------------------------------------------------
-    aor: Dict[str, str] = {"id": name, "type": "aor"}
+    aor: Dict[str, str] = {"id": name}
 
     if is_dynamic:
         aor["max_contacts"]    = "1"
@@ -269,7 +269,6 @@ def convert_row(
     if secret and defaultuser:
         auth_row = {
             "id":        auth_id,
-            "type":      "auth",
             "auth_type": "userpass",
             "username":  defaultuser,
             "password":  secret,
@@ -280,7 +279,6 @@ def convert_row(
     if secret and defaultuser and not is_dynamic:
         reg_row = {
             "id":                       f"{name}_reg",
-            "type":                     "registration",
             "transport":                chosen_transport,
             "outbound_auth":            auth_id,
             "server_uri":               f"sip:{host}:{port}",
