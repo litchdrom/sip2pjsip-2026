@@ -169,7 +169,7 @@ def convert_row(
     is_dynamic = (not host) or host.lower() == "dynamic"
 
     # --- ps_endpoints -------------------------------------------------------
-    ep: Dict[str, str] = {"id": name, "type": "endpoint"}
+    ep: Dict[str, str] = {"id": name}
 
     chosen_transport = _TRANSPORT_MAP.get((transport or "").lower(), default_transport)
     ep["transport"] = chosen_transport
@@ -236,23 +236,28 @@ def convert_row(
         elif enc is False:
             ep["media_encryption"] = "no"
 
-    # outbound_auth
+    # auth / outbound_auth
+    # Dynamic peers (phones) register *to* Asterisk → use auth= for inbound challenge.
+    # Static peers (trunks) have Asterisk register *to* them → use outbound_auth=.
     if secret and defaultuser and not insecure_no_auth:
-        ep["outbound_auth"] = auth_id
+        if is_dynamic:
+            ep["auth"] = auth_id
+        else:
+            ep["outbound_auth"] = auth_id
 
     if outboundprx:
         ep["outbound_proxy"] = outboundprx
     if mailbox:
         ep["mailboxes"] = mailbox
     if busylevel:
-        ep["devicestate_busy_at"] = busylevel
+        ep["device_state_busy_at"] = busylevel
     if deny:
         ep["deny"] = deny
     if permit:
         ep["permit"] = permit
 
     # --- ps_aors ------------------------------------------------------------
-    aor: Dict[str, str] = {"id": name, "type": "aor"}
+    aor: Dict[str, str] = {"id": name}
 
     if is_dynamic:
         aor["max_contacts"]    = "1"
@@ -269,7 +274,6 @@ def convert_row(
     if secret and defaultuser:
         auth_row = {
             "id":        auth_id,
-            "type":      "auth",
             "auth_type": "userpass",
             "username":  defaultuser,
             "password":  secret,
@@ -280,7 +284,6 @@ def convert_row(
     if secret and defaultuser and not is_dynamic:
         reg_row = {
             "id":                       f"{name}_reg",
-            "type":                     "registration",
             "transport":                chosen_transport,
             "outbound_auth":            auth_id,
             "server_uri":               f"sip:{host}:{port}",
